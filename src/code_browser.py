@@ -1,38 +1,78 @@
 import sys
+import json
 
 from rich.syntax import Syntax
 from rich.traceback import Traceback
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, VerticalScroll
-from textual.reactive import var
 from textual.events import Key
-from textual.widgets import DirectoryTree, Footer, Header, Static
+from textual.widgets import DirectoryTree, Footer, Static, Input
 
+sys.path.append("")
+import tools
+
+CONFIG = './config.json'
 
 class CodeBrowser(App):
     """Textual code browser app."""
 
-    CSS_PATH = "code_browser.tcss"
+    CSS =  """
+    Screen {
+    background: $surface-darken-1;
+    &:inline {
+        height: 50vh;
+            }
+    }
+
+    #tree-view {
+        display: block;
+        max-width: 50%;
+        scrollbar-gutter: stable;
+        overflow: auto;
+        width: auto;
+        height: 100%;
+        dock: left;
+    }
+
+    #code-view {
+        overflow: auto scroll;
+        min-width: 100%;
+        hatch: right $primary;   
+    }
+
+    #code {
+        width: auto;
+    }
+
+    #response {
+            margin-top: 1;
+    }
+
+    """
+
     BINDINGS = [
-        ("f", "toggle_files", "Toggle Files"),
-        (".", "toggle_hidden", "Toggle Hidden"),
         ("q", "quit", "Quit"),
     ]
     ALIASES = {"h": "left", "j": "down", "k": "up", "l": "right"}
 
-    show_tree = var(True)
-    show_hidden = var(True)
+    def __init__(self):
+        with open(CONFIG) as f:
+            j = json.load(f)
+        self.SYNTAX = j.get("syntax", dict(line_numbers=True,
+                                            word_wrap=False,
+                                            indent_guides=True,
+                                            theme="github-dark")
+                            )
+        self.PREAMBLE = j.get("preamble", "")
+        self.PROMPT = j.get("prompt", "")
 
-    def watch_show_tree(self, show_tree: bool) -> None:
-        """Called when the `show_tree` var is modified."""
-        self.set_class(show_tree, "-show-tree")
+        if "key" in j:
+            self.CLIENT = tools.client(key=j["key"])
+        else:
+            raise ValueError("`config.json` does not have an LLM key provided under the top-level `key`.")
 
-    def action_toggle_files(self) -> None:
-        self.show_tree = not self.show_tree
-
-    def action_toggle_hidden(self) -> None:
-        self.show_hidden = not self.show_hidden
+        super().__init__()
 
     async def on_key(self, event: Key) -> None:
         event.key = self.ALIASES.get(event.key, event.key)
@@ -42,36 +82,42 @@ class CodeBrowser(App):
         """Compose our UI."""
         path = "./" if len(sys.argv) < 2 else sys.argv[1]
         with Container():
+            yield Input(placeholder="How can the LLM help analyze this file?", value=self.PROMPT)
             yield DirectoryTree(path, id="tree-view")
             with VerticalScroll(id="code-view"):
                 yield Static(id="code", expand=True)
+            yield Static(id="response")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one(DirectoryTree).focus()
 
-    def on_directory_tree_file_selected(
+    async def on_input_changed(self, message: Input.Changed) -> None:
+        self.PROMPT = message.value
+
+    async def on_directory_tree_file_selected(
         self, event: DirectoryTree.FileSelected
     ) -> None:
-        """Called when the user click a file in the directory tree."""
+        # Don't propogate the message up the widget tree to the container
         event.stop()
-        code_view = self.query_one("#code", Static)
+
+        # Apply syntax
+        code: Static = self.query_one("#code", Static)
         try:
             syntax = Syntax.from_path(
                 str(event.path),
-                line_numbers=True,
-                word_wrap=False,
-                indent_guides=True,
-                theme="github-dark",
+                **self.SYNTAX
             )
         except Exception:
-            code_view.update(Traceback(theme="github-dark", width=None))
-            self.sub_title = "ERROR"
+            code.update(Traceback(theme="github-dark", width=None))
         else:
-            code_view.update(syntax)
+            code.update(syntax)
             self.query_one("#code-view").scroll_home(animate=False)
-            self.sub_title = str(event.path)
 
+        # Send file path to the model
+        file = event.path.absolute()
+        response = await tools.query(self.CLIENT, self.PROMPT, self.PREAMBLE, args={"file": file})
+        self.query_one('#response', Static).update(response)
 
 if __name__ == "__main__":
     CodeBrowser().run()
