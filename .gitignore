@@ -1,4 +1,7 @@
 *
+!static/
+!static/*
+!README.md
 !requirements.txt
 !.gitignore
 !src/
